@@ -1,8 +1,9 @@
 import numpy as np
 import os
 import sys
+import time
 
-import imageio # or trade out with your favorite alternative image writer
+import imageio
 
 if sys.version_info >= (3, 0):
     import tkinter as tk
@@ -14,7 +15,7 @@ import panda3d.core
 from direct.showbase.ShowBase import ShowBase
 
 from itertools import izip
-from renderer import CameraTrackEditingWidget, PLYNode, X3DNodePath
+from renderer import CameraTrackEditingWidget, OBJNodePath, PLYNode, X3DNodePath
 from renderer.rotation import Quaternion
 
 
@@ -25,26 +26,23 @@ from renderer.rotation import Quaternion
 #-------------------------------------------------------------------------------
 
 class VideoTool(ShowBase):
-    VIEW_RADIUS_MIN = 0.001
-    VIEW_RADIUS_MAX = 20.
-    VIEW_RADIUS_MULT = 1.1
-    INV_VIEW_RADIUS_MULT = 1. / VIEW_RADIUS_MULT
-
-    ROT_MULT = 2.2
-    XY_TRANS_MULT = 1.8
-    Z_TRANS_MULT = 1.8
-
     BACKGROUND_COLOR = (0, 0, 0) # RGB \in [0,255]
     #BACKGROUND_COLOR = (135, 206, 235) # RGB \in [0,255]
 
-    # Panda3d has this weird "look down the +y axis" convention; when setting
-    # camera pose, we'll right-multiply by VIEW_QUAT to get the camera looking
-    # down the +z axis, with +y down.
-    VIEW_QUAT = Quaternion((1. / np.sqrt(2.), 1. / np.sqrt(2.), 0., 0.))
+    DOUBLE_CLICK_RATE = 0.4 # from first click on to last click off, in seconds
 
     def __init__(self, args):
         ShowBase.__init__(self)
         base.startTk()
+
+        self.view_radius_min = args.view_radius_min
+        self.view_radius_max = args.view_radius_max
+        self.view_radius_mult = args.view_radius_mult
+        self.inv_view_radius_mult = 1. / self.view_radius_mult
+
+        self.rot_mult = args.rot_mult
+        self.xy_trans_mult = args.xy_trans_mult
+        self.z_trans_mult = args.z_trans_mult
 
         self.starting_frame = args.starting_frame
         self.stopping_frame = args.stopping_frame
@@ -71,29 +69,46 @@ class VideoTool(ShowBase):
         self.editing_widget.start_recording_callback = self.startRecording
         self.editing_widget.stop_recording_callback = self.stopRecording
 
+        self.editing_widget.recenter_scene_callback = self.recenterScene
+
         self.write_frame_complete = False
 
         # loaded meshes
         self.meshes = []
 
         # lights
-        dlight1 = p3d.core.DirectionalLight('dlight1')
+        dlight1 = p3d.core.DirectionalLight("dlight1")
         dlight1.setColor(p3d.core.VBase4(1, 1, 1, 1))
         self.dlight1_node = render.attachNewNode(dlight1)
 
-        #dlight2 = p3d.core.DirectionalLight('dlight2')
+        #dlight2 = p3d.core.DirectionalLight("dlight2")
         #dlight2.setColor(p3d.core.VBase4(1, 1, 1, 1))
         #self.dlight2_node = render.attachNewNode(dlight2)
         #self.dlight2_node.setHpr(180, 0, 0)
 
-        alight = p3d.core.AmbientLight('alight')
+        alight = p3d.core.AmbientLight("alight")
         alight.setColor(p3d.core.VBase4(1, 1, 1, 1))
         self.alight_node = render.attachNewNode(alight)
 
+        # for handing double-clicking
+        # https://discourse.panda3d.org/t/coordinates-in-3d/15530/8
+        self.prev_last_click_on = 0
+        self.last_click_on = 0
+        collision_node = p3d.core.CollisionNode("double_click_ray")
+        collision_node.setFromCollideMask(
+            p3d.core.GeomNode.getDefaultCollideMask())
+        self.double_click_ray = p3d.core.CollisionRay()
+        collision_node.addSolid(self.double_click_ray)
+        self.double_click_object_queue = p3d.core.CollisionHandlerQueue()
+        self.double_click_object_checker = p3d.core.CollisionTraverser()
+        self.double_click_object_checker.addCollider(
+            base.camera.attachNewNode(collision_node),
+            self.double_click_object_queue)
+
         # camera lens
         lens = self.camNode.getLens()
-        lens.setNear(1e-3)
-        lens.setFar(200.)
+        lens.setNear(args.clip_near)
+        lens.setFar(args.clip_far)
 
         # camera controls
         self.camera_center = np.array((0., -4., 0.))
@@ -101,6 +116,7 @@ class VideoTool(ShowBase):
         self.view_radius = 1.
 
         self.start_new_mouse_action = True
+        self.do_center_view_on_click = False
         self.do_rotate = False
         self.do_xy_trans = False
         self.do_z_trans = False
@@ -135,11 +151,16 @@ class VideoTool(ShowBase):
     #---------------------------------------------------------------------------
 
     def addMesh(self, filepath):
-        if filepath.endswith(".ply"):
+        if filepath.endswith(".obj"):
+            self.meshes.append(OBJNodePath(filepath))
+            self.meshes[-1].reparentTo(render)
+        elif filepath.endswith(".ply"):
             self.meshes.append(render.attachNewNode(PLYNode(filepath)))
         elif filepath.endswith(".x3d"):
             self.meshes.append(X3DNodePath(filepath))
             self.meshes[-1].reparentTo(render)
+
+        #self.meshes[-1].setTwoSided(True)
 
         # set up lights for the mesh
         self.meshes[-1].setLight(self.dlight1_node)
@@ -162,9 +183,14 @@ class VideoTool(ShowBase):
     def startMouseMove(self):
         self.do_rotate = True
         self.start_new_mouse_action = True
+        self.prev_last_click_on = self.last_click_on
+        self.last_click_on = time.time()
 
     def stopMouseMove(self):
         self.do_rotate = False
+        click_time = time.time()
+        if click_time - self.prev_last_click_on < self.DOUBLE_CLICK_RATE:
+            self.do_center_view_on_click = True
 
     def startZTrans(self):
         self.do_z_trans = True
@@ -181,13 +207,13 @@ class VideoTool(ShowBase):
         self.do_xy_trans = False
 
     def decreaseViewRadius(self):
-        new_view_radius = self.view_radius * VideoTool.INV_VIEW_RADIUS_MULT
-        if new_view_radius >= VideoTool.VIEW_RADIUS_MIN:
+        new_view_radius = self.view_radius * self.inv_view_radius_mult
+        if new_view_radius >= self.view_radius_min:
             self.view_radius = new_view_radius
 
     def increaseViewRadius(self):
-        new_view_radius = self.view_radius * VideoTool.VIEW_RADIUS_MULT
-        if new_view_radius <= VideoTool.VIEW_RADIUS_MAX:
+        new_view_radius = self.view_radius * self.view_radius_mult
+        if new_view_radius <= self.view_radius_max:
             self.view_radius = new_view_radius
 
     #---------------------------------------------------------------------------
@@ -222,8 +248,23 @@ class VideoTool(ShowBase):
         if self.start_new_mouse_action:
             self.start_new_mouse_action = False
 
+        elif self.do_center_view_on_click:
+            # TODO (True): something's still wrong with the ray settings
+            self.do_center_view_on_click = False
+            self.double_click_ray.setFromLens(self.camNode, *mouse_xy)
+            self.double_click_ray.setDirection(
+                *(self.camera_rot.ToR().T.dot(
+                    self.double_click_ray.getDirection())))
+            self.double_click_ray.setOrigin(*self.camera_center)
+            self.double_click_object_checker.traverse(render)
+            if self.double_click_object_queue.getNumEntries() > 0:
+                self.double_click_object_queue.sortEntries()
+                self.camera_center = np.array(list(
+                    self.double_click_object_queue.getEntry(0).getSurfacePoint(
+                        render)))
+
         elif self.do_rotate:
-            dxy = (self.old_mouse_xy - mouse_xy) * VideoTool.ROT_MULT
+            dxy = (self.old_mouse_xy - mouse_xy) * self.rot_mult
             dxy = np.array((dxy[0], -1., dxy[1]))
             dxy /= np.linalg.norm(dxy) # normalize to unit length
 
@@ -233,19 +274,22 @@ class VideoTool(ShowBase):
 
             self.camera_rot *= q
 
+            #self.dlight1_node.node().setDirection(
+            #    p3d.core.LVector3f(*q.ToR()[:,1]))
+
         elif self.do_xy_trans:
             dxy = mouse_xy - self.old_mouse_xy
             dxy = np.array((dxy[0], 0., dxy[1]))
 
             self.camera_center -= (
                 self.camera_rot.ToR().dot(dxy) * self.view_radius *
-                VideoTool.XY_TRANS_MULT)
+                self.xy_trans_mult)
 
         elif self.do_z_trans:
             self.camera_center += (
                 (mouse_xy[1] - self.old_mouse_xy[1]) *
                 self.camera_rot.ToR()[:,1] * self.view_radius *
-                VideoTool.Z_TRANS_MULT)
+                self.z_trans_mult)
 
         self._update_camera_view()
         
@@ -295,6 +339,33 @@ class VideoTool(ShowBase):
             #self.meshes[asset_idx].setLightOff(self.dlight2_node)
 
     #---------------------------------------------------------------------------
+
+    def recenterScene(self):
+        vmin = np.zeros(3) + np.inf
+        vmax = np.zeros(3)
+
+        for mesh in self.meshes:
+            node = mesh.node()
+            num_geoms = node.getNumGeoms()
+            for i in xrange(num_geoms):
+                geom = node.getGeom(i)
+                vertices = p3d.core.GeomVertexReader(
+                    geom.getVertexData(), "vertex")
+                n = 0
+                while not vertices.isAtEnd():
+                    n += 1
+                    vertex = vertices.getData3f()
+                    vmin = np.minimum(vmin, vertex)
+                    vmax = np.maximum(vmax, vertex)
+
+        if np.all(vmin < vmax):
+            self.camera_center = 0.5 * (vmin + vmax)
+            self._update_camera_view()
+
+            print "New camera center:", self.camera_center
+
+
+    #---------------------------------------------------------------------------
     # video recording functions
     #---------------------------------------------------------------------------
 
@@ -315,7 +386,7 @@ class VideoTool(ShowBase):
         # get image; see
         # gist.github.com/alexlee-gk/b28fb962c9b2da586d1591bac8888f1f
         texture = self.win.getScreenshot()
-        data = texture.getRamImageAs("BGR")
+        data = texture.getRamImageAs("RGB")
         image = np.frombuffer(data.get_data(), np.uint8)
         image.shape = (texture.getYSize(), texture.getXSize(), 3)
         image = np.flipud(image).astype(np.float32)
@@ -334,6 +405,7 @@ class VideoTool(ShowBase):
 
         if self.exit_when_recording_done:
             exit()
+
 
 #-------------------------------------------------------------------------------
 #
@@ -364,22 +436,32 @@ if __name__ == "__main__":
         "--stopping_frame", type=int, default=None,
         help="stop play at the this (absolute) frame index, exclusive")
 
+    parser.add_argument("--clip_near", type=float, default=0.001)
+    parser.add_argument("--clip_far", type=float, default=200.)
+
+    parser.add_argument("--view_radius_min", type=float, default=0.001)
+    parser.add_argument("--view_radius_max", type=float, default=20.)
+    parser.add_argument("--view_radius_mult", type=float, default=1.1)
+
+    parser.add_argument("--rot_mult", type=float, default=2.2)
+    parser.add_argument("--xy_trans_mult", type=float, default=1.8)
+    parser.add_argument("--z_trans_mult", type=float, default=1.8)
+
     args = parser.parse_args()
 
-#    p3d.core.loadPrcFileData('', 'want-tk true') # on Mac
-    p3d.core.loadPrcFileData('', 'win-size %i %i' % tuple(args.window_size))
-    p3d.core.loadPrcFileData('', 'win-fixed-size 1')
-    p3d.core.loadPrcFileData('', 'audio-library-name null')
-    p3d.core.loadPrcFileData('', 'framebuffer-multisample 1')
-    p3d.core.loadPrcFileData('', 'depth-bits 24') # set for NVidia GTX 980 Ti
-    p3d.core.loadPrcFileData('', 'multisamples 16') # set for NVidia GTX 980 Ti
+    p3d.core.loadPrcFileData("", "win-size %i %i" % tuple(args.window_size))
+    p3d.core.loadPrcFileData("", "win-fixed-size 1")
+    p3d.core.loadPrcFileData("", "audio-library-name null")
+    p3d.core.loadPrcFileData("", "framebuffer-multisample 1")
+    p3d.core.loadPrcFileData("", "depth-bits 24") # set for NVidia GTX 980 Ti
+    p3d.core.loadPrcFileData("", "multisamples 16") # set for NVidia GTX 980 Ti
 
     # debugging
-#    p3d.core.loadPrcFileData('', 'notify-level-display debug')
-#    p3d.core.loadPrcFileData('', 'notify-level-glgsg debug')
+#    p3d.core.loadPrcFileData("", "notify-level-display debug")
+#    p3d.core.loadPrcFileData("", "notify-level-glgsg debug")
 
     # fixed frame rate
-    p3d.core.loadPrcFileData('', 'clock-mode limited')
-    p3d.core.loadPrcFileData('', 'clock-frame-rate %i' % args.fps)
+    p3d.core.loadPrcFileData("", "clock-mode limited")
+    p3d.core.loadPrcFileData("", "clock-frame-rate %i" % args.fps)
 
     VideoTool(args).run()

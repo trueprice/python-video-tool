@@ -51,11 +51,17 @@ class CameraTrackEditingWidget(tk.Frame, object):
         self.start_recording_callback = None
         self.stop_recording_callback = None
 
+        self.recenter_scene_callback = None
+
         self.get_view_params = None # function handle; see video_tool.py
 
         self.fps = fps
 
+
+        #
         # top row of buttons
+        #
+
         top_frame = tk.Frame(self)
         load_button = tk.Button(top_frame, text="Load", command=self.loadTrack)
         load_button.pack(side=tk.LEFT)
@@ -63,7 +69,20 @@ class CameraTrackEditingWidget(tk.Frame, object):
         save_button.pack(side=tk.LEFT)
         top_frame.pack()
 
+        #
+        # recenter
+        #
+
+        config_frame = tk.Frame(self)
+        recenter_button = tk.Button(
+            top_frame, text="Recenter", command=self.recenterScene)
+        recenter_button.pack(side=tk.LEFT)
+        config_frame.pack()
+
+        #
         # second row of buttons
+        #
+
         controls_frame = tk.Frame(self)
         play_button = tk.Button(controls_frame, text="Play", command=self.play)
         play_button.pack(side=tk.LEFT)
@@ -75,7 +94,10 @@ class CameraTrackEditingWidget(tk.Frame, object):
         pause_button.pack(side=tk.LEFT)
         controls_frame.pack()
 
+        #
         # third row of buttons
+        #
+
         self.is_recording = False
         record_frame = tk.Frame(self)
         self.record_button = tk.Button(record_frame, text="Record",
@@ -84,11 +106,17 @@ class CameraTrackEditingWidget(tk.Frame, object):
         self.default_record_button_color = self.record_button.cget("bg")
         record_frame.pack()
 
+
+        #
         # assets list
-        assets_label = tk.Label(self, text="Assets")
+        #
+
+        main_assets_frame = tk.Frame(self)
+
+        assets_label = tk.Label(main_assets_frame, text="Assets")
         assets_label.pack(fill=tk.X)
 
-        self.asset_buttons_frame = tk.Frame(self)
+        self.asset_buttons_frame = tk.Frame(main_assets_frame)
 
         add_asset_button = tk.Button(
             self.asset_buttons_frame, text="Add", command=self._load_asset)
@@ -100,15 +128,35 @@ class CameraTrackEditingWidget(tk.Frame, object):
 
         self.asset_buttons_frame.pack()
 
+        # https://stackoverflow.com/questions/3085696/
+        self.assets_canvas = tk.Canvas(main_assets_frame, borderwidth=0)
         self.assets_list = AssetEntryListbox(
-            self, self._change_ambient, self._change_directional)
-        self.assets_list.pack(fill=tk.X)
+            self.assets_canvas, self._change_ambient, self._change_directional)
+        self.assets_scrollbar = tk.Scrollbar(
+            main_assets_frame,
+            orient="vertical",
+            command=self.assets_canvas.yview)
+        self.assets_canvas.configure(yscrollcommand=self.assets_scrollbar.set)
+        self.assets_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.assets_canvas.pack(side=tk.LEFT, fill=tk.X)
+        self.assets_canvas.create_window(
+            (4, 4), window=self.assets_list, anchor=tk.NW,
+            tags="self.assets_list")
+        self.assets_list.bind("<Configure>", self._on_assets_list_configured)
 
+        main_assets_frame.pack(side=tk.LEFT)
+
+
+        #
         # camera track list
-        track_label = tk.Label(self, text="Camera Track")
+        #
+
+        main_track_frame = tk.Frame(self)
+
+        track_label = tk.Label(main_track_frame, text="Camera Track")
         track_label.pack()
 
-        self.track_buttons_frame = tk.Frame(self)
+        self.track_buttons_frame = tk.Frame(main_track_frame)
 
         add_track_button = tk.Button(self.track_buttons_frame, text="Add",
             command=self._add_track_entry)
@@ -126,8 +174,22 @@ class CameraTrackEditingWidget(tk.Frame, object):
 
         self.track_buttons_frame.pack()
 
-        self.track_frame = tk.Frame(self)
-        self.track_frame.pack(side=tk.LEFT)
+        self.track_canvas = tk.Canvas(main_track_frame, borderwidth=0)
+        self.track_frame = tk.Frame(self.track_canvas)
+        self.track_scrollbar = tk.Scrollbar(
+            main_track_frame,
+            orient="vertical",
+            command=self.track_canvas.yview)
+        self.track_canvas.configure(yscrollcommand=self.track_scrollbar.set)
+        self.track_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.track_canvas.pack(side=tk.LEFT, fill=tk.X)
+        self.track_canvas.create_window(
+            (4, 4), window=self.track_frame, anchor=tk.NW,
+            tags="self.track_frame")
+        self.track_frame.bind("<Configure>", self._on_track_list_configured)
+
+        main_track_frame.pack(side=tk.LEFT)
+
 
         # unique identifier for generated keyframes
         self.selected_keyframe_idx = -1
@@ -150,7 +212,7 @@ class CameraTrackEditingWidget(tk.Frame, object):
     def _load_asset(self, filepath=None):
         if not filepath:
             filepath = askopenfilename(
-                filetypes=[("Asset files", ("*.ply", "*.x3d"))])
+                filetypes=[("Asset files", ("*.obj", "*.ply", "*.x3d"))])
 
         if filepath:
             self.assets_list.addAsset(filepath)
@@ -207,6 +269,16 @@ class CameraTrackEditingWidget(tk.Frame, object):
 
         self.selected_keyframe_idx = self.keyframes_list.index(keyframe_id) \
                                      if keyframe_selected else -1
+
+    #---------------------------------------------------------------------------
+
+    def _on_assets_list_configured(self, event):
+        self.assets_canvas.configure(
+            scrollregion=self.assets_canvas.bbox("all"))
+
+    def _on_track_list_configured(self, event):
+        self.track_canvas.configure(
+            scrollregion=self.track_canvas.bbox("all"))
 
     #---------------------------------------------------------------------------
 
@@ -462,6 +534,12 @@ class CameraTrackEditingWidget(tk.Frame, object):
             self.record_button.configure(bg=self.default_record_button_color)
 
     #---------------------------------------------------------------------------
+
+    def recenterScene(self):
+        if self.recenter_scene_callback:
+            self.recenter_scene_callback()
+
+    #---------------------------------------------------------------------------
     # load/save functions
     #---------------------------------------------------------------------------
 
@@ -508,7 +586,7 @@ class CameraTrackEditingWidget(tk.Frame, object):
                         int(data[8]))
 
         # set camera view to first keyframe
-        if self.keyframe_activation_callback:
+        if self.keyframe_activation_callback and len(self.keyframes_list) > 0:
             keyframe = self.keyframes[self.keyframes_list[0]]
             self.keyframe_activation_callback(
                 keyframe.camera_rot, keyframe.camera_center,

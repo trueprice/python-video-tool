@@ -10,6 +10,8 @@ class PLYNode(p3d.core.GeomNode):
     # split up into smaller
     MAX_NUM_VERTICES = 2**32
 
+    DEFAULT_MESH_COLOR = 180 # grayscale value
+
     def __init__(self, ply_file, name=""):
         super(PLYNode, self).__init__(name)
 
@@ -19,24 +21,20 @@ class PLYNode(p3d.core.GeomNode):
 
         self.has_faces = ("face" in mesh and mesh["face"].count > 0)
 
-        vertices = np.column_stack((v["x"], v["y"], v["z"]))
+        vertices = np.column_stack(
+            [v["x"].astype(np.float32, copy=False),
+             v["y"].astype(np.float32, copy=False),
+             v["z"].astype(np.float32, copy=False)])
 
-        # TODO (True): couldn't find a better way to check these...
-        self.has_colors = True
-        try:
-            v["red"]; v["green"]; v["blue"]
-            INV_255 = 1. / 255.
-            colors = \
-                np.column_stack((v["red"], v["green"], v["blue"])) * INV_255
-        except:
-            self.has_colors = False
-        
-        self.has_normals = True
-        try:
-            v["nx"]; v["ny"]; v["nz"]
-            normals = np.column_stack((v["nx"], v["ny"], v["nz"]))
-        except:
-            self.has_normals = False
+        vertex_data = []
+
+        self.has_normals = all(
+            x in v._property_lookup for x in ["nx", "ny", "nz"])
+        if self.has_normals:
+            vertex_data += [
+                v["nx"].astype(np.float32, copy=False),
+                v["ny"].astype(np.float32, copy=False),
+                v["nz"].astype(np.float32, copy=False)]
 
         if self.has_faces:
             #faces = np.array([f[0] for f in mesh["face"]])
@@ -44,8 +42,37 @@ class PLYNode(p3d.core.GeomNode):
 
             # set up vertex normals from faces
             if not self.has_normals:
-                normals = compute_vertex_normals(vertices, faces)
+                vertex_data.append(compute_vertex_normals(vertices, faces))
                 self.has_normals = True
+
+        self.has_colors = all(
+            x in v._property_lookup for x in ["red", "green", "blue"])
+        if self.has_colors:
+            colors = np.empty((len(vertices), 4), dtype=np.uint8)
+            # TODO (True): maybe check for all integer types?
+            if v["red"].dtype == np.uint8:
+                colors[:,0] = v["red"]
+                colors[:,1] = v["green"]
+                colors[:,2] = v["blue"]
+            else:
+                colors[:,0] = v["red"] * 255.
+                colors[:,1] = v["green"] * 255.
+                colors[:,2] = v["blue"] * 255.
+
+            colors[:,3] = 255
+
+            # alias the color uint8 values as a single float32 for convience
+            vertex_data.append(colors.view(np.float32))
+        elif self.has_faces:
+            # draw a colorless mesh as gray
+            self.has_colors = True
+            colors = np.empty((len(vertices), 4), dtype=np.uint8)
+            colors[:] = np.array(
+                (DEFAULT_MESH_COLOR,) * 3 + (255,), dtype=np.uint8)
+            vertex_data.append(colors.view(np.float32))
+        
+        if vertex_data:
+            vertices = np.column_stack([vertices] + vertex_data)
 
         # set up data in chunks
         for i in xrange(0, len(vertices), PLYNode.MAX_NUM_VERTICES):
@@ -65,29 +92,16 @@ class PLYNode(p3d.core.GeomNode):
                 name, p3d_data_format, p3d.core.Geom.UHStatic)
             p3d_data.setNumRows(n)
 
-            # load vertex positions
-            v_writer = p3d.core.GeomVertexWriter(p3d_data, "vertex") 
-            for vertex in vertices[i:stop]:
-                v_writer.addData3f(*vertex)
-
-            # load colors
-            if self.has_colors:
-                c_writer = p3d.core.GeomVertexWriter(p3d_data, "color") 
-                for color in colors[i:stop]:
-                    c_writer.addData4f(color[0], color[1], color[2], 1.)
-
-            # load normals
-            if self.has_normals:
-                n_writer = p3d.core.GeomVertexWriter(p3d_data, "normal") 
-                for normal in normals[i:stop]:
-                    n_writer.addData3f(*normal)
+            p3d_data.modifyArray(0).modifyHandle().setData(
+                vertices[i:stop].tostring())
 
             # add faces, if available
             if self.has_faces:
                 p3d_primitives = p3d.core.GeomTriangles(p3d.core.Geom.UHStatic)
+                p3d_primitives.setIndexType(p3d.core.GeomEnums.NTUint32)
                 mask = np.all(faces >= i, axis=1) & np.all(faces < stop, axis=1)
-                for f in faces[mask]:
-                    p3d_primitives.addVertices(*(f - i))
+                p3d_primitives.modifyVertices().modifyHandle().setData(
+                    faces[mask].tostring())
 
             # otherwise, render a point cloud
             else:
