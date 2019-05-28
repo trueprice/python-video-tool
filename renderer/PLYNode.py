@@ -17,7 +17,8 @@ class PLYNode(p3d.core.GeomNode):
 
         # load mesh
         mesh = PlyData.read(ply_file)
-        v = mesh["vertex"] # v is an easier-to-read reference to the vertex data
+        v = mesh["vertex"] # easier-to-read reference to the vertex data
+        self.num_vertices = v.count
 
         self.has_faces = ("face" in mesh and mesh["face"].count > 0)
 
@@ -38,12 +39,15 @@ class PLYNode(p3d.core.GeomNode):
 
         if self.has_faces:
             #faces = np.array([f[0] for f in mesh["face"]])
+            self.num_faces = mesh["face"].count
             faces = PlyMake2D(mesh["face"].data["vertex_indices"])
 
             # set up vertex normals from faces
             if not self.has_normals:
                 vertex_data.append(compute_vertex_normals(vertices, faces))
                 self.has_normals = True
+        else:
+            self.num_faces = 0
 
         self.has_colors = all(
             x in v._property_lookup for x in ["red", "green", "blue"])
@@ -68,7 +72,7 @@ class PLYNode(p3d.core.GeomNode):
             self.has_colors = True
             colors = np.empty((len(vertices), 4), dtype=np.uint8)
             colors[:] = np.array(
-                (DEFAULT_MESH_COLOR,) * 3 + (255,), dtype=np.uint8)
+                (PLYNode.DEFAULT_MESH_COLOR,) * 3 + (255,), dtype=np.uint8)
             vertex_data.append(colors.view(np.float32))
         
         if vertex_data:
